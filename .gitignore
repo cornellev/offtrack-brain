@@ -1,0 +1,12 @@
+.vscode/
+__pycache__/
+log/
+build/
+install/
+log/*
+build/*
+install/*
+./log/*
+./build/*
+./install/*
+clangd

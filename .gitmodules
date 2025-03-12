@@ -1,0 +1,3 @@
+[submodule "cev_msgs"]
+	path = cev_msgs
+	url = https://github.com/cornellev/cev_msgs.git

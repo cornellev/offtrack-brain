@@ -1,0 +1,5 @@
+.devcontainer.json
+.dockerignore
+.gitignore
+deploy.sh
+Dockerfile.*
