@@ -4,6 +4,9 @@
 [submodule "cev/cev_offtrack_map_server_ros2"]
 	path = cev/cev_offtrack_map_server_ros2
 	url = https://github.com/cornellev/cev_offtrack_map_server_ros2.git
-[submodule "cev_planner"]
+[submodule "cev/cev_sim_trajectory_follower_ros2/cev_planner"]
 	path = cev/cev_sim_trajectory_follower_ros2/cev_planner
+	url = https://github.com/cornellev/cev_planner.git
+[submodule "cev/cev_offtrack_planner_ros2/cev_planner"]
+	path = cev/cev_offtrack_planner_ros2/cev_planner
 	url = https://github.com/cornellev/cev_planner.git

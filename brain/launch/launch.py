@@ -23,13 +23,16 @@ def launch(package, file, launch_folder="launch", arguments={}):
 def generate_launch_description():
     return LaunchDescription(
         [
-            Node(
-                package="cev_planner_ros2",
-                executable="planner_node",
-                name="cev_planner_ros2_node",
-                output="screen",
-            ),
             launch("cev_offtrack_map_server_ros2", "launch.py"),
-            launch("cev_sim_trajectory_follower_ros2", "launch.py"),
+            launch("cev_offtrack_planner_ros2", "launch.py"),
+            
+            # RVIZ
+            # Node(
+            #     package="rviz2",
+            #     executable="rviz2",
+            #     name="rviz2",
+            #     output="screen",
+            #     arguments=[]
+            # )
         ]
     )
