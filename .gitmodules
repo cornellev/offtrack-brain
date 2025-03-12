@@ -3,4 +3,7 @@
 	url = https://github.com/cornellev/cev_msgs.git
 [submodule "cev/cev_offtrack_map_server_ros2"]
 	path = cev/cev_offtrack_map_server_ros2
-	url = git@github.com:cornellev/cev_offtrack_map_server_ros2.git
+	url = https://github.com/cornellev/cev_offtrack_map_server_ros2.git
+[submodule "cev/cev_planner_ros2"]
+	path = cev/cev_planner_ros2
+	url = https://github.com/cornellev/cev_planner_ros2.git
