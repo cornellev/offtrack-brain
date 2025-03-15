@@ -23,16 +23,6 @@ public:
         RCLCPP_INFO(this->get_logger(), "Initializing planner node");
 
         // Init Planner
-        Dimensions dimensions = Dimensions{1, 1, 1};
-        Constraints full_constraints = Constraints{
-            {-1000, 1000},  // x
-            {-1000, 1000},  // y
-            {-.34, .34},    // tau
-            {-5.0, 5.0},    // vels
-            {-2.5, 2.5},    // accel
-            {-.20, .20}     // dtau
-        };
-
         local_planner = std::make_shared<local_planner::MPC>(dimensions, full_constraints);
 
         // Subscribers
@@ -50,8 +40,12 @@ public:
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/odometry/truth", 1);
         local_path_pub_ = this->create_publisher<nav_msgs::msg::Path>("planner/local_path", 1);
 
-        timer_ = this->create_wall_timer(std::chrono::milliseconds(int(dt * 1000)),
-            std::bind(&PlannerNode::local_plan, this));
+        planning_timer_ =
+            this->create_wall_timer(std::chrono::milliseconds(int(planning_dt * 1000)),
+                std::bind(&PlannerNode::local_plan, this));
+
+        update_timer_ = this->create_wall_timer(std::chrono::milliseconds(int(update_dt * 1000)),
+            std::bind(&PlannerNode::odom_publish, this));
     }
 
 private:
@@ -76,6 +70,7 @@ private:
         this->map = SimpleCostMap(map_grid).toCostmap();
         this->map_initialized = true;
     }
+
     void costmap_callback(nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
         this->costmap = SimpleCostMap(map_to_grid(msg)).toCostmap();
         this->costmap_initialized = true;
@@ -87,8 +82,12 @@ private:
         target_initialized = true;
     }
 
-    void local_plan() {
-        RCLCPP_INFO(this->get_logger(), "Publishing odometry.");
+    void odom_publish() {
+        // Update and publish odometry
+        RCLCPP_DEBUG(this->get_logger(), "Publishing odometry.");
+
+        current_state = current_state.update(current_input, update_dt, dimensions,
+            full_constraints);
 
         nav_msgs::msg::Odometry odom;
         odom.header.frame_id = "map";
@@ -112,15 +111,15 @@ private:
         odom.pose.pose.orientation = tf2::toMsg(quat);
 
         odom_pub_->publish(odom);
+    }
 
-        RCLCPP_INFO(this->get_logger(), "Finished publishing odometry.");
-
+    void local_plan() {
         if (!map_initialized || !costmap_initialized || !target_initialized) {
-            RCLCPP_INFO(this->get_logger(), "Waiting for map and target.");
+            RCLCPP_DEBUG(this->get_logger(), "Waiting for map and target.");
             return;
         }
 
-        RCLCPP_INFO(this->get_logger(), "Planning path.");
+        RCLCPP_DEBUG(this->get_logger(), "Planning path.");
 
         float dist_to_dest = current_state.pose.distance_to(target_state.pose);
         if (dist_to_dest < 0.3) {
@@ -135,9 +134,10 @@ private:
         Trajectory path = local_planner->plan_path(map_grid, current_state, target_state, waypoints,
             initial_guess, costmap);
 
-        current_state = path.waypoints[1];
+        current_input = Input((path.waypoints[1].tau - path.waypoints[0].tau) / planning_dt,
+            (path.waypoints[1].vel - path.waypoints[0].vel) / planning_dt);
 
-        RCLCPP_INFO(this->get_logger(), "Publishing local path.");
+        RCLCPP_DEBUG(this->get_logger(), "Publishing local path.");
 
         nav_msgs::msg::Path nav_path;
         nav_path.header.stamp = this->now();
@@ -158,7 +158,10 @@ private:
     }
 
     // SETTINGS
-    float dt = 0.4;
+    float planning_dt = 0.4;
+    float update_dt = .05;
+
+    Input current_input = Input(0, 0);
 
     // Map, Costmap
     Grid map_grid;
@@ -176,9 +179,19 @@ private:
     // Planner
     std::shared_ptr<local_planner::MPC> local_planner;
 
+    Dimensions dimensions = Dimensions{1, 1, 1};
+    Constraints full_constraints = Constraints{
+        {-1000, 1000},  // x
+        {-1000, 1000},  // y
+        {-.34, .34},    // tau
+        {-5.0, 5.0},    // vels
+        {-2.5, 2.5},    // accel
+        {-.20, .20}     // dtau
+    };
+
     // ROS
-    // Walltimer for `dt` seconds
-    rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr planning_timer_;
+    rclcpp::TimerBase::SharedPtr update_timer_;
 
     // Subscribers
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
