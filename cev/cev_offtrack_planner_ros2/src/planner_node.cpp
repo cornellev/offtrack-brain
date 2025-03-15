@@ -46,6 +46,8 @@ public:
 
         update_timer_ = this->create_wall_timer(std::chrono::milliseconds(int(update_dt * 1000)),
             std::bind(&PlannerNode::odom_publish, this));
+
+        cost_map_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("planner/cost_map", 1);
     }
 
 private:
@@ -74,6 +76,72 @@ private:
     void costmap_callback(nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
         this->costmap = SimpleCostMap(map_to_grid(msg)).toCostmap();
         this->costmap_initialized = true;
+
+        Grid grid = Grid();
+        grid.origin = Pose{msg->info.origin.position.x, msg->info.origin.position.y, 0};
+        grid.resolution = msg->info.resolution;
+
+        grid.data = Eigen::MatrixXf(msg->info.width, msg->info.height);
+
+        RCLCPP_INFO(this->get_logger(), "Generated cost maps.");
+
+        // Convert local plan cost map to an occupancy grid message and publish
+        nav_msgs::msg::OccupancyGrid cost_map_msg;
+        cost_map_msg.header.stamp = this->now();
+        cost_map_msg.header.frame_id = "map";
+        cost_map_msg.info.resolution = grid.resolution;
+        cost_map_msg.info.width = grid.data.cols();
+        cost_map_msg.info.height = grid.data.rows();
+        cost_map_msg.info.origin.position.x = grid.origin.x;
+        cost_map_msg.info.origin.position.y = grid.origin.y;
+        cost_map_msg.info.origin.position.z = 0;
+        cost_map_msg.info.origin.orientation.x = 0;
+        cost_map_msg.info.origin.orientation.y = 0;
+        cost_map_msg.info.origin.orientation.z = 0;
+        cost_map_msg.info.origin.orientation.w = 1;
+
+        cost_map_msg.data.clear();
+
+        for (int i = 0; i < grid.data.rows(); i++) {
+            for (int j = 0; j < grid.data.cols(); j++) {
+                cost_map_msg.data.push_back((int)((costmap->debug_(i, j)) * 100));
+            }
+        }
+        nav_msgs::msg::OccupancyGrid mirrored_msg;
+        mirrored_msg.header.stamp = this->now();
+        mirrored_msg.header.frame_id = "map";
+        mirrored_msg.info.resolution = grid.resolution;
+        mirrored_msg.info.width = grid.data.rows();
+        mirrored_msg.info.height = grid.data.cols();
+        mirrored_msg.info.origin.position.z = 0;
+        mirrored_msg.info.origin.orientation.x = 0;
+        mirrored_msg.info.origin.orientation.y = 0;
+        mirrored_msg.info.origin.orientation.z = 0;
+        mirrored_msg.info.origin.orientation.w = 1;
+
+        mirrored_msg.data.clear();
+
+        for (int i = 0; i < grid.data.rows(); i++) {
+            for (int j = 0; j < grid.data.cols(); j++) {
+                mirrored_msg.data.push_back(0);
+            }
+        }
+
+        for (int y = 0; y < cost_map_msg.info.height; ++y) {
+            for (int x = 0; x < cost_map_msg.info.width; ++x) {
+                int new_x = y;
+                int new_y = x;
+                mirrored_msg.data[new_y * cost_map_msg.info.height + new_x] =
+                    cost_map_msg.data[y * cost_map_msg.info.width + x];
+            }
+        }
+
+        // Swap the origin x and y
+        mirrored_msg.info.origin.position.x = cost_map_msg.info.origin.position.x;
+        mirrored_msg.info.origin.position.y = cost_map_msg.info.origin.position.y;
+
+        RCLCPP_INFO(this->get_logger(), "Published cost map.");
+        cost_map_pub_->publish(mirrored_msg);
     }
 
     void target_callback(geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -184,8 +252,8 @@ private:
         {-1000, 1000},  // x
         {-1000, 1000},  // y
         {-.34, .34},    // tau
-        {-5.0, 5.0},    // vels
-        {-2.5, 2.5},    // accel
+        {0.0, 10.0},    // vels
+        {-7.5, 5.0},    // accel
         {-.20, .20}     // dtau
     };
 
@@ -203,6 +271,8 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr local_path_pub_;
 
     tf2_ros::TransformBroadcaster tf_broadcast_;
+
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr cost_map_pub_;
 };
 
 int main(int argc, char** argv) {
