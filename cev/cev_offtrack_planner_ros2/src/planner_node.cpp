@@ -26,11 +26,12 @@ public:
         local_planner = std::make_shared<local_planner::MPC>(dimensions, full_constraints);
 
         // Subscribers
+        auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).transient_local();
         map_sub_ = this->create_subscription<nav_msgs::msg::OccupancyGrid>("/offtrack_server/map",
-            1, std::bind(&PlannerNode::map_callback, this, std::placeholders::_1));
+            qos, std::bind(&PlannerNode::map_callback, this, std::placeholders::_1));
 
         costmap_sub_ =
-            this->create_subscription<nav_msgs::msg::OccupancyGrid>("/offtrack_server/costmap", 1,
+            this->create_subscription<nav_msgs::msg::OccupancyGrid>("/offtrack_server/costmap", qos,
                 std::bind(&PlannerNode::costmap_callback, this, std::placeholders::_1));
 
         target_rviz_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>("/goal_pose",
@@ -74,6 +75,7 @@ private:
     }
 
     void costmap_callback(nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+        RCLCPP_INFO(this->get_logger(), "Received cost map.");
         this->costmap = SimpleCostMap(map_to_grid(msg)).toCostmap();
         this->costmap_initialized = true;
 
@@ -82,6 +84,15 @@ private:
         grid.resolution = msg->info.resolution;
 
         grid.data = Eigen::MatrixXf(msg->info.width, msg->info.height);
+
+        double avg = 0.0;
+        for (int i = 0; i < msg->info.width; i++) {
+            for (int j = 0; j < msg->info.height; j++) {
+                avg += msg->data[j * msg->info.width + i];
+            }
+        }
+        avg /= grid.data.rows() * grid.data.cols();
+        RCLCPP_INFO(this->get_logger(), "Cost: %f", avg);
 
         RCLCPP_INFO(this->get_logger(), "Generated cost maps.");
 
