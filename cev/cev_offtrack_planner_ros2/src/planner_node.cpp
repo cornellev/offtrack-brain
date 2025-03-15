@@ -14,6 +14,9 @@
 #include "local_planning/mpc.h"
 #include "pose.h"
 #include "cost_map/simple.h"
+#include "cost_map/gaussian_conv.h"
+#include "cost_map/global.h"
+#include "cost_map/nearest.h"
 
 using namespace cev_planner;
 
@@ -45,10 +48,11 @@ public:
             this->create_wall_timer(std::chrono::milliseconds(int(planning_dt * 1000)),
                 std::bind(&PlannerNode::local_plan, this));
 
-        update_timer_ = this->create_wall_timer(std::chrono::milliseconds(int(update_dt * 1000)),
-            std::bind(&PlannerNode::odom_publish, this));
+        // update_timer_ = this->create_wall_timer(std::chrono::milliseconds(int(update_dt * 1000)),
+        //     std::bind(&PlannerNode::odom_publish, this));
 
-        cost_map_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("planner/cost_map", 1);
+        cost_map_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("planner/cost_map",
+            qos);
     }
 
 private:
@@ -72,87 +76,27 @@ private:
         map_grid = map_to_grid(msg);
         this->map = SimpleCostMap(map_grid).toCostmap();
         this->map_initialized = true;
+        RCLCPP_INFO(get_logger(), "Received regular map.");
     }
 
     void costmap_callback(nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-        RCLCPP_INFO(this->get_logger(), "Received cost map.");
         this->costmap = SimpleCostMap(map_to_grid(msg)).toCostmap();
         this->costmap_initialized = true;
+        RCLCPP_INFO(this->get_logger(), "Received cost map.");
 
-        Grid grid = Grid();
-        grid.origin = Pose{msg->info.origin.position.x, msg->info.origin.position.y, 0};
-        grid.resolution = msg->info.resolution;
+        RCLCPP_INFO(this->get_logger(), "I compiled");
 
-        grid.data = Eigen::MatrixXf(msg->info.width, msg->info.height);
-
-        double avg = 0.0;
-        for (int i = 0; i < msg->info.width; i++) {
-            for (int j = 0; j < msg->info.height; j++) {
-                avg += msg->data[j * msg->info.width + i];
+        // Find largest value in costmap
+        float max_cost = 0;
+        for (int i = 0; i < map_grid.data.rows(); i++) {
+            for (int j = 0; j < map_grid.data.cols(); j++) {
+                if (costmap->debug_(i, j) > max_cost) {
+                    max_cost = costmap->debug_(i, j);
+                }
             }
         }
-        avg /= grid.data.rows() * grid.data.cols();
-        RCLCPP_INFO(this->get_logger(), "Cost: %f", avg);
-
-        RCLCPP_INFO(this->get_logger(), "Generated cost maps.");
-
-        // Convert local plan cost map to an occupancy grid message and publish
-        nav_msgs::msg::OccupancyGrid cost_map_msg;
-        cost_map_msg.header.stamp = this->now();
-        cost_map_msg.header.frame_id = "map";
-        cost_map_msg.info.resolution = grid.resolution;
-        cost_map_msg.info.width = grid.data.cols();
-        cost_map_msg.info.height = grid.data.rows();
-        cost_map_msg.info.origin.position.x = grid.origin.x;
-        cost_map_msg.info.origin.position.y = grid.origin.y;
-        cost_map_msg.info.origin.position.z = 0;
-        cost_map_msg.info.origin.orientation.x = 0;
-        cost_map_msg.info.origin.orientation.y = 0;
-        cost_map_msg.info.origin.orientation.z = 0;
-        cost_map_msg.info.origin.orientation.w = 1;
-
-        cost_map_msg.data.clear();
-
-        for (int i = 0; i < grid.data.rows(); i++) {
-            for (int j = 0; j < grid.data.cols(); j++) {
-                cost_map_msg.data.push_back((int)((costmap->debug_(i, j)) * 100));
-            }
-        }
-        nav_msgs::msg::OccupancyGrid mirrored_msg;
-        mirrored_msg.header.stamp = this->now();
-        mirrored_msg.header.frame_id = "map";
-        mirrored_msg.info.resolution = grid.resolution;
-        mirrored_msg.info.width = grid.data.rows();
-        mirrored_msg.info.height = grid.data.cols();
-        mirrored_msg.info.origin.position.z = 0;
-        mirrored_msg.info.origin.orientation.x = 0;
-        mirrored_msg.info.origin.orientation.y = 0;
-        mirrored_msg.info.origin.orientation.z = 0;
-        mirrored_msg.info.origin.orientation.w = 1;
-
-        mirrored_msg.data.clear();
-
-        for (int i = 0; i < grid.data.rows(); i++) {
-            for (int j = 0; j < grid.data.cols(); j++) {
-                mirrored_msg.data.push_back(0);
-            }
-        }
-
-        for (int y = 0; y < cost_map_msg.info.height; ++y) {
-            for (int x = 0; x < cost_map_msg.info.width; ++x) {
-                int new_x = y;
-                int new_y = x;
-                mirrored_msg.data[new_y * cost_map_msg.info.height + new_x] =
-                    cost_map_msg.data[y * cost_map_msg.info.width + x];
-            }
-        }
-
-        // Swap the origin x and y
-        mirrored_msg.info.origin.position.x = cost_map_msg.info.origin.position.x;
-        mirrored_msg.info.origin.position.y = cost_map_msg.info.origin.position.y;
-
-        RCLCPP_INFO(this->get_logger(), "Published cost map.");
-        cost_map_pub_->publish(mirrored_msg);
+        // Print max cost
+        RCLCPP_INFO(this->get_logger(), "Max cost: %f", max_cost);
     }
 
     void target_callback(geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -164,9 +108,6 @@ private:
     void odom_publish() {
         // Update and publish odometry
         RCLCPP_DEBUG(this->get_logger(), "Publishing odometry.");
-
-        current_state = current_state.update(current_input, update_dt, dimensions,
-            full_constraints);
 
         nav_msgs::msg::Odometry odom;
         odom.header.frame_id = "map";
@@ -190,9 +131,35 @@ private:
         odom.pose.pose.orientation = tf2::toMsg(quat);
 
         odom_pub_->publish(odom);
+
+        current_state = current_state.update(current_input, update_dt, dimensions,
+            full_constraints);
     }
 
     void local_plan() {
+        nav_msgs::msg::Odometry odom;
+        odom.header.frame_id = "map";
+        odom.header.stamp = this->now();
+        odom.child_frame_id = "base_link";
+        odom.pose.pose.position.x = current_state.pose.x;
+        odom.pose.pose.position.y = current_state.pose.y;
+        odom.pose.pose.position.z = 0.0;
+
+        geometry_msgs::msg::TransformStamped tf_stamped;
+        tf_stamped.header = odom.header;
+        tf_stamped.child_frame_id = odom.child_frame_id;
+        tf_stamped.transform.translation.x = odom.pose.pose.position.x;
+        tf_stamped.transform.translation.y = odom.pose.pose.position.y;
+        tf_stamped.transform.translation.z = odom.pose.pose.position.z;
+        tf_stamped.transform.rotation = odom.pose.pose.orientation;
+        tf_broadcast_.sendTransform(tf_stamped);
+
+        Eigen::AngleAxisd angle_axis(current_state.pose.theta, Eigen::Vector3d::UnitZ());
+        Eigen::Quaterniond quat(angle_axis);
+        odom.pose.pose.orientation = tf2::toMsg(quat);
+
+        odom_pub_->publish(odom);
+
         if (!map_initialized || !costmap_initialized || !target_initialized) {
             RCLCPP_DEBUG(this->get_logger(), "Waiting for map and target.");
             return;
@@ -201,8 +168,9 @@ private:
         RCLCPP_DEBUG(this->get_logger(), "Planning path.");
 
         float dist_to_dest = current_state.pose.distance_to(target_state.pose);
-        if (dist_to_dest < 0.3) {
+        if (dist_to_dest < 15.0) {
             RCLCPP_INFO(this->get_logger(), "Reached target");
+            current_state.vel = 0;
             return;
         }
 
@@ -215,6 +183,8 @@ private:
 
         current_input = Input((path.waypoints[1].tau - path.waypoints[0].tau) / planning_dt,
             (path.waypoints[1].vel - path.waypoints[0].vel) / planning_dt);
+
+        current_state = path.waypoints[1];
 
         RCLCPP_DEBUG(this->get_logger(), "Publishing local path.");
 
@@ -237,7 +207,7 @@ private:
     }
 
     // SETTINGS
-    float planning_dt = 0.4;
+    float planning_dt = 0.2;
     float update_dt = .05;
 
     Input current_input = Input(0, 0);
@@ -264,8 +234,8 @@ private:
         {-1000, 1000},  // y
         {-.34, .34},    // tau
         {0.0, 10.0},    // vels
-        {-7.5, 5.0},    // accel
-        {-.20, .20}     // dtau
+        {-1.0, 2.5},    // accel
+        {-.10, .10}     // dtau
     };
 
     // ROS
