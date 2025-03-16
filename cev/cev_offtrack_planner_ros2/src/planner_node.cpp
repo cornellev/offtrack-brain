@@ -37,8 +37,9 @@ public:
             this->create_subscription<nav_msgs::msg::OccupancyGrid>("/offtrack_server/costmap", qos,
                 std::bind(&PlannerNode::costmap_callback, this, std::placeholders::_1));
 
-        target_rviz_sub_ = this->create_subscription<geometry_msgs::msg::PoseStamped>("/goal_pose",
-            1, std::bind(&PlannerNode::target_callback, this, std::placeholders::_1));
+        global_path_sub_ =
+            this->create_subscription<nav_msgs::msg::Path>("/offtrack_server/global_path", 1,
+                std::bind(&PlannerNode::global_path_callback, this, std::placeholders::_1));
 
         // Publishers
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("/odometry/truth", 1);
@@ -48,14 +49,47 @@ public:
             this->create_wall_timer(std::chrono::milliseconds(int(planning_dt * 1000)),
                 std::bind(&PlannerNode::local_plan, this));
 
-        // update_timer_ = this->create_wall_timer(std::chrono::milliseconds(int(update_dt * 1000)),
-        //     std::bind(&PlannerNode::odom_publish, this));
+        update_timer_ = this->create_wall_timer(std::chrono::milliseconds(int(update_dt * 1000)),
+            std::bind(&PlannerNode::odom_publish, this));
 
         cost_map_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("planner/cost_map",
             qos);
+
+        // DEBUG
+        first_target_pub_ =
+            this->create_publisher<nav_msgs::msg::Odometry>("planner/debug/first_target", 1);
+        second_target_pub_ =
+            this->create_publisher<nav_msgs::msg::Odometry>("planner/debug/second_target", 1);
     }
 
 private:
+    void global_path_callback(nav_msgs::msg::Path::SharedPtr msg) {
+        Trajectory traj = Trajectory();
+        for (geometry_msgs::msg::PoseStamped pose: msg->poses) {
+            traj.waypoints.push_back(State(pose.pose.position.x, pose.pose.position.y, 0, 0, 0));
+        }
+
+        global_path = traj;
+        global_path_initialized = true;
+
+        current_state = global_path.waypoints[0];
+        current_state.pose.theta = -M_PI / 2.0;
+
+        if (global_path.waypoints.size() > 1) {
+            first_target = global_path.waypoints[1];
+        } else {
+            first_target = current_state;
+        }
+
+        if (global_path.waypoints.size() > 2) {
+            second_target = global_path.waypoints[2];
+        } else {
+            second_target = first_target;
+        }
+
+        RCLCPP_INFO(this->get_logger(), "Received global path.");
+    }
+
     Grid map_to_grid(nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
         Grid grid;
 
@@ -80,32 +114,35 @@ private:
     }
 
     void costmap_callback(nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
+        RCLCPP_INFO(this->get_logger(), "Received cost map.");
         this->costmap = SimpleCostMap(map_to_grid(msg)).toCostmap();
         this->costmap_initialized = true;
+
         RCLCPP_INFO(this->get_logger(), "Received cost map.");
-
-        RCLCPP_INFO(this->get_logger(), "I compiled");
-
-        // Find largest value in costmap
-        float max_cost = 0;
-        for (int i = 0; i < map_grid.data.rows(); i++) {
-            for (int j = 0; j < map_grid.data.cols(); j++) {
-                if (costmap->debug_(i, j) > max_cost) {
-                    max_cost = costmap->debug_(i, j);
-                }
-            }
-        }
-        // Print max cost
-        RCLCPP_INFO(this->get_logger(), "Max cost: %f", max_cost);
     }
 
-    void target_callback(geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-        RCLCPP_INFO(this->get_logger(), "Received target.");
-        target_state = State(msg->pose.position.x, msg->pose.position.y, 0, 0, 0);
-        target_initialized = true;
+    nav_msgs::msg::Odometry state_to_odom(State state) {
+        nav_msgs::msg::Odometry odom;
+        odom.header.frame_id = "map";
+        odom.header.stamp = this->now();
+        odom.child_frame_id = "debug";
+        odom.pose.pose.position.x = state.pose.x;
+        odom.pose.pose.position.y = state.pose.y;
+        odom.pose.pose.position.z = 0.0;
+
+        Eigen::AngleAxisd angle_axis(state.pose.theta, Eigen::Vector3d::UnitZ());
+        Eigen::Quaterniond quat(angle_axis);
+        odom.pose.pose.orientation = tf2::toMsg(quat);
+
+        return odom;
     }
 
     void odom_publish() {
+        if (!global_path_initialized) {
+            RCLCPP_DEBUG(this->get_logger(), "Waiting for path.");
+            return;
+        }
+
         // Update and publish odometry
         RCLCPP_DEBUG(this->get_logger(), "Publishing odometry.");
 
@@ -134,40 +171,50 @@ private:
 
         current_state = current_state.update(current_input, update_dt, dimensions,
             full_constraints);
+
+        // Update targets
+        if (current_global_waypoint < global_path.waypoints.size()) {
+            // RCLCPP_INFO(this->get_logger(), "A");
+            // RCLCPP_INFO(this->get_logger(), "%f",
+            //     current_state.pose.distance_to(first_target.pose));
+            // Progress in path if reached first waypoint
+            if (current_state.pose.distance_to(first_target.pose) < 15.0) {
+                current_global_waypoint += 1;
+                if (current_global_waypoint < global_path.waypoints.size()) {
+                    first_target = global_path.waypoints[current_global_waypoint];
+                    // RCLCPP_INFO(this->get_logger(), "progressing.");
+                }
+                first_target_pub_->publish(state_to_odom(first_target));
+
+                if (current_global_waypoint + 1 < global_path.waypoints.size()) {
+                    second_target = global_path.waypoints[current_global_waypoint + 1];
+                } else {
+                    second_target = first_target;
+                }
+                second_target_pub_->publish(state_to_odom(second_target));
+            }
+        }
+    }
+
+    bool hits_obstacle(Trajectory traj) {
+        for (int i = 0; i < traj.waypoints.size(); i++) {
+            if (costmap->cost(traj.waypoints[i]) > 10) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     void local_plan() {
-        nav_msgs::msg::Odometry odom;
-        odom.header.frame_id = "map";
-        odom.header.stamp = this->now();
-        odom.child_frame_id = "base_link";
-        odom.pose.pose.position.x = current_state.pose.x;
-        odom.pose.pose.position.y = current_state.pose.y;
-        odom.pose.pose.position.z = 0.0;
-
-        geometry_msgs::msg::TransformStamped tf_stamped;
-        tf_stamped.header = odom.header;
-        tf_stamped.child_frame_id = odom.child_frame_id;
-        tf_stamped.transform.translation.x = odom.pose.pose.position.x;
-        tf_stamped.transform.translation.y = odom.pose.pose.position.y;
-        tf_stamped.transform.translation.z = odom.pose.pose.position.z;
-        tf_stamped.transform.rotation = odom.pose.pose.orientation;
-        tf_broadcast_.sendTransform(tf_stamped);
-
-        Eigen::AngleAxisd angle_axis(current_state.pose.theta, Eigen::Vector3d::UnitZ());
-        Eigen::Quaterniond quat(angle_axis);
-        odom.pose.pose.orientation = tf2::toMsg(quat);
-
-        odom_pub_->publish(odom);
-
-        if (!map_initialized || !costmap_initialized || !target_initialized) {
+        if (!map_initialized || !costmap_initialized || !global_path_initialized) {
             RCLCPP_DEBUG(this->get_logger(), "Waiting for map and target.");
             return;
         }
 
         RCLCPP_DEBUG(this->get_logger(), "Planning path.");
 
-        float dist_to_dest = current_state.pose.distance_to(target_state.pose);
+        float dist_to_dest = current_state.pose.distance_to(first_target.pose);
         if (dist_to_dest < 15.0) {
             RCLCPP_INFO(this->get_logger(), "Reached target");
             current_state.vel = 0;
@@ -176,15 +223,36 @@ private:
 
         Trajectory waypoints;
         Trajectory initial_guess;
-        waypoints.waypoints.push_back(target_state);
+        waypoints.waypoints.push_back(first_target);
 
-        Trajectory path = local_planner->plan_path(map_grid, current_state, target_state, waypoints,
-            initial_guess, costmap);
+        Trajectory path = local_planner->plan_path(map_grid, current_state, second_target,
+            waypoints, initial_guess, costmap);
 
+        if (hits_obstacle(path)) {
+            RCLCPP_INFO(this->get_logger(), "Hit obstacle, discarding plan.");
+
+            if (current_trajectory_init) {
+                if (position_in_current_trajectory + 2 < current_trajectory.waypoints.size()) {
+                    position_in_current_trajectory += 1;
+                    current_input = Input(
+                        (current_trajectory.waypoints[position_in_current_trajectory + 1].tau
+                            - current_trajectory.waypoints[position_in_current_trajectory].tau)
+                            / planning_dt,
+                        (current_trajectory.waypoints[position_in_current_trajectory + 1].vel
+                            - current_trajectory.waypoints[position_in_current_trajectory].vel)
+                            / planning_dt);
+                }
+            }
+            return;
+        }
+
+        // Update current input for odom updater
         current_input = Input((path.waypoints[1].tau - path.waypoints[0].tau) / planning_dt,
             (path.waypoints[1].vel - path.waypoints[0].vel) / planning_dt);
 
-        current_state = path.waypoints[1];
+        position_in_current_trajectory = 0;
+        current_trajectory = path;
+        current_trajectory_init = true;
 
         RCLCPP_DEBUG(this->get_logger(), "Publishing local path.");
 
@@ -220,10 +288,15 @@ private:
     bool costmap_initialized = false;
 
     // States, Targets
-    State current_state = State(13.0, 298.913, M_PI / 2.0, 0.0, 0.0);
-    State target_state = State();
+    State current_state;
 
-    bool target_initialized = false;
+    State first_target;
+    State second_target;
+
+    Trajectory global_path = Trajectory();
+
+    bool global_path_initialized = false;
+    int current_global_waypoint = 0;
 
     // Planner
     std::shared_ptr<local_planner::MPC> local_planner;
@@ -238,6 +311,10 @@ private:
         {-.10, .10}     // dtau
     };
 
+    Trajectory current_trajectory;
+    bool current_trajectory_init = false;
+    int position_in_current_trajectory = 0;
+
     // ROS
     rclcpp::TimerBase::SharedPtr planning_timer_;
     rclcpp::TimerBase::SharedPtr update_timer_;
@@ -245,7 +322,7 @@ private:
     // Subscribers
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
     rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub_;
-    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr target_rviz_sub_;
+    rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr global_path_sub_;
 
     // Publishers
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
@@ -254,6 +331,10 @@ private:
     tf2_ros::TransformBroadcaster tf_broadcast_;
 
     rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr cost_map_pub_;
+
+    // DEBUG
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr first_target_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr second_target_pub_;
 };
 
 int main(int argc, char** argv) {
